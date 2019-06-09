@@ -1,0 +1,1164 @@
+/apache/spark2.3/bin/spark-sql --master yarn --queue hddq-gdi-ep --executor-memory 10G
+ssh apollo-rno-devours.vip.hadoop.ebay.com
+
+job 1
+hive -f /home/b_um/sellermetrics/hivescripts/syiscratch_segments.hql  -hiveconf start_date=2019-04-21 \
+-hiveconf ebay.job.name=selling_metrics.HIVE_SYI_SCRATCH_SGMNTS -hiveconf ebay.job.runid=$(date +%s)
+hive -f /home/b_um/sellermetrics/hivescripts/syiscratch_detail.hql  -hiveconf start_date=2019-04-21 \
+-hiveconf process_year=2019 -hiveconf process_month=04 -hiveconf process_day=21 \
+-hiveconf ebay.job.name=selling_metrics.HIVE_SYI_SCRATCH_DETAIL -hiveconf ebay.job.runid=$(date +%s)
+
+job 2
+hive -f /export/home/b_um/sellermetrics/hivescripts/gmv_step1.hql -hiveconf start_date=2019-04-12 -hiveconf end_date=2019-04-21
+hive -f /export/home/b_um/sellermetrics/hivescripts/gmv_step2.hql -hiveconf start_date=2019-04-12 -hiveconf end_date=2019-04-21
+
+job 3
+hive -f /home/b_um/sellermetrics/hivescripts/seller_detail.hql  -hiveconf start_date=2019-03-23 \
+-hiveconf end_date=2019-04-21 \
+-hiveconf ebay.job.name=selling_metrics.HIVE_SELLER_DETAIL -hiveconf ebay.job.runid=$(date +%s)
+
+job 4
+hive -f /export/home/b_um/sellermetrics/hivescripts/seller_conversion_step1.hql -hiveconf start_date=2019-02-19 -hiveconf end_date=2019-04-19
+hive -f /export/home/b_um/sellermetrics/hivescripts/seller_conversion_step2.hql -hiveconf start_date=2019-02-19 -hiveconf end_date=2019-04-19
+
+job 5
+hive -f /home/b_um/sellermetrics/hivescripts/seller_session_dtl_step1.hql -hiveconf start_date=2019-04-14 -hiveconf end_date=2019-04-15
+
+
+viewfs://apollo-rno//hdmi-prod/b_um/epdatasets/selling_metrics_stg/slgsyislrsgmt
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+-bash-4.2$ cat seller_conversion_step1.hql
+Issues -- 
+FAILED: SemanticException [Error 10001]: Line 22:11 Table not found 'dw_lstg_gen'
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+set mapred.job.queue.name=hddq-gdi-ep;
+set yarn.app.mapreduce.am.resource.mb=8192;
+set yarn.app.mapreduce.am.command-opts=-Xmx8192m;
+set mapreduce.job.max.split.locations = 2000;
+
+CREATE TABLE IF NOT EXISTS selling_prod.exl_seller_conversion_fnl_w
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.avro.AvroSerDe'
+WITH SERDEPROPERTIES ('avro.schema.url'='viewfs://apollo-rno/user/b_um/avroschema/c2c_conversion_schema.avsc')
+STORED AS inputformat 'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat'
+OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
+LOCATION 'viewfs://apollo-rno/apps/hdmi-prod/b_um/epdatasets/selling_metrics_stg/exl_seller_conversion_fnl_w';
+
+
+select orgnlstartdate,orgnlEndDate,count(*) from selling_prod.exl_seller_conversion_fnl_w
+group by orgnlstartdate,orgnlEndDate;
+
+
+-- get all the fresh new listings between the start and end date
+INSERT overwrite TABLE selling_prod.exl_seller_conversion_fnl_w
+select
+orgnlParentItemId
+,childItemId
+,slrId
+,orgnlStartDate
+,orgnlEndDate
+,lstgSiteId
+,auctionType
+,sellerCountryName
+,lstgDuration
+,listingTools
+,experimentChannel
+,siteName
+,sellerSegment
+,vertical
+,listingMode
+,duration
+,gmbUsdAmt
+,quantitySold
+from
+(select
+a.item_id as orgnlParentItemId,
+a.item_id as childItemId,
+a.slr_id as slrId,
+a.auct_start_dt as orgnlStartDate,
+a.auct_end_dt as orgnlEndDate,
+a.lstg_site_id as lstgSiteId,
+(case when a.auct_type_cd in (7,9) then 'FP' else 'Auction' end) as auctionType,
+CASE WHEN a.slr_cntry_id IN (-999, -1,0,1,225,679,1000) THEN 'US'
+           WHEN a.slr_cntry_id IN (3) THEN 'UK'
+           WHEN a.slr_cntry_id IN (15) THEN 'AU'
+           WHEN a.slr_cntry_id IN (77) THEN 'DE'
+           WHEN a.slr_cntry_id = 71 THEN 'FR'
+           WHEN a.slr_cntry_id = 101 THEN 'IT'
+           WHEN a.slr_cntry_id = 186 THEN 'ES'
+           ELSE 'OTHER'
+END AS sellerCountryName,
+CASE
+WHEN gtc_up_flag = 1 THEN 'GTC'
+WHEN DATEDIFF(sale_sched_end_dt,auct_start_dt) IN (1,3,5,7,10,30) THEN concat('Non-GTC Duration:' , cast(DATEDIFF(sale_sched_end_dt,auct_start_dt) AS varchar(2)),' days' )
+ELSE 'Non-GTC Other'
+ END AS lstgDuration,
+a.listing_tool as listingTools,
+CASE WHEN c.app_id is NULL THEN 1
+WHEN TRIM(prdct_name) IN ('IPhoneApp','IPad') THEN 5
+WHEN TRIM(prdct_name) IN ('Android','Android Motors') THEN 4
+WHEN TRIM(prdct_name) IN ('MobWeb','MobWebGXO') THEN 2
+ELSE -999 END AS experimentChannel,
+CASE WHEN a.lstg_site_id IN (0,100)   THEN 'US'
+     WHEN a.lstg_site_id =   3   THEN 'UK'
+     WHEN a.lstg_site_id =   15 THEN 'AU'
+     WHEN a.lstg_site_id =   77 THEN 'DE'
+     WHEN a.lstg_site_id = 71 THEN 'FR'
+     WHEN a.lstg_site_id = 101 THEN 'IT'
+     WHEN a.lstg_site_id = 186 THEN 'ES'
+     ELSE 'OTHER SITES' END AS siteName,
+CASE WHEN UPPER(seller_segment_detail_eu) IN ('MERCHANT','LARGE MERCHANT','ENTREPRENEUR') THEN 'B2C' ELSE seller_segment_detail_eu END AS sellerSegment ,
+vertical ,
+    CASE WHEN a.LSTG_CHNL_CD = 1 THEN 'Relist'
+       WHEN a.LSTG_CHNL_CD = 2 THEN 'Sell Similar'
+    WHEN a.LSTG_CHNL_CD = 3 THEN 'Sell Like'
+    WHEN a.LSTG_CHNL_CD = 4 THEN 'Sell New'
+    else 'Sell New' end as listingMode,
+    DATEDIFF(sale_sched_end_dt,auct_start_dt)  AS duration ,
+start_price_usd as gmbUsdAmt,
+avail_qty as quantitySold
+FROM prs_restricted_v.slng_lstg_super_fact a
+left join
+prod_exl_checkout.exl_dw_api_mbl_app c
+on
+a.app_id = c.app_id
+WHERE auct_start_dt between '2019-04-10' and '2019-04-19'
+AND auct_end_dt >= '2019-04-10'
+AND iscore=1
+AND relist_up_flag=0
+AND lstg_channel <> 'Sell Similar'
+AND fnl_type IN ('FNL under daily 50')
+)a
+where sellerSegment <> 'B2C'
+;
+
+-- get the relist items for the fresh new listings
+INSERT into selling_prod.exl_seller_conversion_fnl_w
+select
+a.orgnlParentItemId
+,b.item_id as childItemId
+,a.slrId
+,a.orgnlStartDate
+,a.orgnlEndDate
+,a.lstgSiteId
+,a.auctionType
+,a.sellerCountryName
+,a.lstgDuration
+,a.listingTools
+,a.experimentChannel
+,a.siteName
+,a.sellerSegment
+,a.vertical
+,a.listingMode
+,a.duration
+,a.gmbUsdAmt
+,a.quantitySold
+from selling_prod.exl_seller_conversion_fnl_w a
+inner join dw_lstg_gen b ON a.orgnlParentItemId = b.orgnl_parent_item_id
+where b.auct_end_dt >='2019-04-10'
+;
+
+
+
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+-bash-4.2$ cat seller_conversion_step2.hql
+Issues -- 
+FAILED: SemanticException [Error 10001]: Line 22:11 Table not found 'dw_lstg_gen'
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+set mapred.job.queue.name=hddq-gdi-ep;
+set yarn.app.mapreduce.am.resource.mb=8192;
+set yarn.app.mapreduce.am.command-opts=-Xmx8192m;
+set mapreduce.job.max.split.locations = 2000;
+
+CREATE TABLE IF NOT EXISTS selling_prod.exl_seller_conversion_fnl_w2
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.avro.AvroSerDe'
+WITH SERDEPROPERTIES ('avro.schema.url'='viewfs://apollo-rno/user/b_um/avroschema/c2c_conversion_schema_final.avsc')
+STORED AS inputformat 'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat'
+OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
+LOCATION 'viewfs://apollo-rno/apps/hdmi-prod/b_um/epdatasets/selling_metrics_stg/exl_seller_conversion_fnl_w2';
+
+--check if any of the fnl or relist item got sold in last 7,30 & 60 days
+
+INSERT overwrite TABLE selling_prod.exl_seller_conversion_fnl_w2
+select
+orgnlParentItemId
+,childItemId
+,userId
+,sessionStartDate
+,orgnlEndDate
+,siteId
+,auctionType
+,sellerCountryName
+,lstgDuration
+,listingTools
+,experimentChannel
+,siteName
+,sellerSegment
+,vertical
+,listingMode
+,duration
+,gmbUsdAmt
+,quantitySold
+,soldDate
+,soldIn
+,soldDuration
+,1 as validListInd
+,case when soldIn = 1 and soldDuration < 7 then 1 else 0 end as soldIn7Days
+,case when soldIn = 1 and soldDuration < 30 then 1 else 0 end as soldIn30days
+,case when soldIn = 1 and soldDuration < 60 then 1 else 0 end as soldIn60Days
+from
+(select
+orgnlParentItemId
+,childItemId
+,userId
+,sessionStartDate
+,orgnlEndDate
+,siteId
+,auctionType
+,sellerCountryName
+,lstgDuration
+,listingTools
+,experimentChannel
+,siteName
+,sellerSegment
+,vertical
+,listingMode
+,duration
+,gmbUsdAmt
+,quantitySold
+,soldDate
+,max(soldIn) as soldIn
+,min(soldDuration) as soldDuration
+from
+(select
+a.orgnlParentItemId
+,a.childItemId
+,a.slrId as userId
+,a.orgnlStartDate as sessionStartDate
+,a.orgnlEndDate
+,a.lstgSiteId as siteId
+,a.auctionType
+,a.sellerCountryName
+,a.lstgDuration
+,a.listingTools
+,a.experimentChannel
+,a.siteName
+,a.sellerSegment
+,a.vertical
+,a.listingMode
+,a.duration
+,a.gmbUsdAmt
+,a.quantitySold
+,CASE WHEN b.created_dt IS NOT NULL THEN b.created_dt ELSE '1900-01-01' END soldDate
+,CASE WHEN b.item_id IS NOT NULL THEN 1 ELSE 0 END AS soldIn
+,CASE WHEN b.created_dt IS NOT NULL THEN DATEDIFF(b.created_dt,a.orgnlStartDate) ELSE -777 END soldDuration
+from selling_prod.exl_seller_conversion_fnl_w a
+left join
+prs_restricted_v.slng_trans_super_fact b
+ON a.childItemId = b.item_id
+AND b.auct_end_dt>='2019-04-10'
+AND b.created_dt >='2019-04-10'
+)a
+group by
+orgnlParentItemId
+,childItemId
+,userId
+,sessionStartDate
+,orgnlEndDate
+,siteId
+,auctionType
+,sellerCountryName
+,lstgDuration
+,listingTools
+,experimentChannel
+,siteName
+,sellerSegment
+,vertical
+,listingMode
+,duration
+,gmbUsdAmt
+,quantitySold
+,soldDate
+)b
+;
+
+
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+-bash-4.2$ cat seller_detail.hql
+--All okay
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+--set hive.exec.reducers.max=1500;
+--set mapred.job.queue.name=hddq-gdi-ep;
+--set yarn.app.mapreduce.am.resource.mb=8192;
+--set yarn.app.mapreduce.am.command-opts=-Xmx8192m;
+--set mapreduce.job.max.split.locations=2000;
+--set hive.exec.reducers.bytes.per.reducer=500000000;
+--set mapreduce.input.fileinputformat.split.maxsize = 128000000;
+--set mapreduce.map.memory.mb=6144;
+--set mapreduce.reduce.memory.mb=5120;
+--set hive.exec.compress.output=true;
+--set mapreduce.output.fileoutputformat.compress=true;
+--set mapred.output.compression.codec=org.apache.hadoop.io.compress.SnappyCodec;
+--set mapreduce.map.speculative=true;
+--set mapreduce.reduce.speculative=true;
+--set hive.mapred.reduce.tasks.speculative.execution=true;
+
+select sessionstartdate,count(*) from selling_prod.exl_trans_listing_w 
+group by sessionstartdate;
+
+
+insert overwrite table selling_prod.exl_trans_listing_w
+select
+slr_id,
+auct_start_dt,
+auct_end_dt,
+item_site_id,
+seller_country_name,
+auction_type,
+gtc_ind,
+listing_tool,
+chnl_id,
+site_name,
+seller_segment,
+vertical,
+seller_tools,
+sum(lstg_item_id),
+sum(lstg_qty_total)
+from
+(SELECT
+slr_id,
+auct_start_dt,
+auct_end_dt,
+item_site_id,
+CASE WHEN a.slr_cntry_id IN (-999, -1,0,1,225,679,1000) THEN 'US'
+           WHEN a.slr_cntry_id IN (3) THEN 'UK'
+           WHEN a.slr_cntry_id IN (15) THEN 'AU'
+           WHEN a.slr_cntry_id IN (77) THEN 'DE'
+           WHEN a.slr_cntry_id = 71 THEN 'FR'
+           WHEN a.slr_cntry_id = 101 THEN 'IT'
+           WHEN a.slr_cntry_id = 186 THEN 'ES'
+           ELSE 'OTHER'
+END AS seller_country_name,
+(case when a.auct_type_cd in (7,9) then 'FP' else 'Auction' end) as auction_type,
+(case when a.gtc_ind = 1 then 'GTC' else 'Non_GTC' end) as gtc_ind,
+CASE WHEN a.app_id = 0 THEN 'SYI' WHEN a.app_id = 194048 THEN 'CUB' WHEN a.app_id = 56507 THEN 'BEAR' WHEN a.app_id = 67161 THEN 'Gandolf' ELSE 'OTHER' END AS listing_tool,
+CASE WHEN c.app_id is NULL THEN 1
+WHEN TRIM(prdct_name) IN ('IPhoneApp','IPad') THEN 5
+WHEN TRIM(prdct_name) IN ('Android','Android Motors') THEN 4
+WHEN TRIM(prdct_name) IN ('MobWeb','MobWebGXO') THEN 2
+ELSE -999 END AS chnl_id,
+CASE WHEN item_site_id IN (0,100)   THEN 'US'
+     WHEN item_site_id =   3   THEN 'UK'
+     WHEN item_site_id =   15 THEN 'AU'
+     WHEN item_site_id =   77 THEN 'DE'
+     WHEN item_site_id = 71 THEN 'FR'
+     WHEN item_site_id = 101 THEN 'IT'
+     WHEN item_site_id = 186 THEN 'ES'
+     ELSE 'OTHER SITES' END AS site_name,
+case when seller_segment_detail_eu in ('Merchant', 'Large Merchant', 'Entrepreneur') then seller_segment_detail_eu
+     when sm_smp_flag in (1,2) then 'C2C SM/SMP' else 'C2C' end as seller_segment,
+a.vertical,
+ (case when a.app_id in (1,61,564,1767,2028,1285,2828,2549,2557,2887) then 'eBay_Tools'
+      when a.app_id in (81,83,131,152,153,237,239,624,1004,1035,1069,1180,1167,1840,1898,2219) then '3rd_party_tools'
+      when a.app_id in (22620, 20513, 18317, 18315, 7192, 2860) then 'ProStores'
+      else 'Other' end) as seller_tools,
+coalesce(count(distinct(a.item_id)),0) as lstg_item_id,
+coalesce(sum(a.qty_avail),0) as lstg_qty_total
+from
+prs_restricted_v.slng_lstg_super_fact a
+left join
+prod_exl_checkout.exl_dw_api_mbl_app c
+on
+a.app_id = c.app_id
+where
+a.auct_start_dt between '2019-04-18' and '2019-04-21'
+and a.iscore = 1
+group by a.slr_id,a.auct_start_dt,a.auct_end_dt,a.item_site_id,a.slr_cntry_id,a.auct_type_cd,a.gtc_ind,a.app_id,c.prdct_name,a.seller_segment_detail_eu,a.sm_smp_flag,a.vertical,c.app_id) a 
+group by slr_id,auct_start_dt,auct_end_dt,item_site_id,seller_country_name,auction_type,gtc_ind,listing_tool,chnl_id,site_name,seller_segment,vertical,seller_tools;
+
+
+select sessionstartdate, count(*) from selling_prod.exl_trans_checkout_w
+group by sessionstartdate;
+
+
+
+
+insert overwrite table selling_prod.exl_trans_checkout_w
+select
+slr_id,
+auct_start_dt,
+auct_end_dt,
+'1900-01-01',
+lstg_site_id,
+seller_country_name,
+auction_type,
+gtc_ind,
+listing_tool,
+chnl_id,
+site_name,
+seller_segment,
+vertical,
+seller_tools,
+sum(scss_item_id),
+sum(gmb),
+sum(qty_sold),
+sum(scss_qty_total)
+from
+(SELECT
+slr_id,
+auct_start_dt,
+auct_end_dt,
+lstg_site_id,
+CASE WHEN a.slr_cntry_id IN (-999, -1,0,1,225,679,1000) THEN 'US'
+           WHEN a.slr_cntry_id IN (3) THEN 'UK'
+           WHEN a.slr_cntry_id IN (15) THEN 'AU'
+           WHEN a.slr_cntry_id IN (77) THEN 'DE'
+           WHEN a.slr_cntry_id = 71 THEN 'FR'
+           WHEN a.slr_cntry_id = 101 THEN 'IT'
+           WHEN a.slr_cntry_id = 186 THEN 'ES'
+           ELSE 'OTHER'
+END AS seller_country_name,
+(case when a.auct_type_cd in (7,9) then 'FP' else 'Auction' end) as auction_type,
+(case when a.gtc_ind = 1 then 'GTC' else 'Non_GTC' end) as gtc_ind,
+CASE WHEN a.app_id = 0 THEN 'SYI' WHEN a.app_id = 194048 THEN 'CUB' WHEN a.app_id = 56507 THEN 'BEAR' WHEN a.app_id = 67161 THEN 'Gandolf' ELSE 'OTHER' END AS listing_tool,
+CASE WHEN c.app_id is NULL THEN 1
+WHEN TRIM(prdct_name) IN ('IPhoneApp','IPad') THEN 5
+WHEN TRIM(prdct_name) IN ('Android','Android Motors') THEN 4
+WHEN TRIM(prdct_name) IN ('MobWeb','MobWebGXO') THEN 2
+ELSE -999 END AS chnl_id,
+CASE WHEN lstg_site_id IN (0,100)   THEN 'US'
+     WHEN lstg_site_id =   3   THEN 'UK'
+     WHEN lstg_site_id =   15 THEN 'AU'
+     WHEN lstg_site_id =   77 THEN 'DE'
+     WHEN lstg_site_id = 71 THEN 'FR'
+     WHEN lstg_site_id = 101 THEN 'IT'
+     WHEN lstg_site_id = 186 THEN 'ES'
+     ELSE 'OTHER SITES' END AS site_name,
+case when seller_segment_detail_eu in ('Merchant', 'Large Merchant', 'Entrepreneur') then seller_segment_detail_eu
+     when sm_smp_flag in (1,2) then 'C2C SM/SMP' else 'C2C' end as seller_segment,
+a.vertical,
+ (case when a.app_id in (1,61,564,1767,2028,1285,2828,2549,2557,2887) then 'eBay_Tools'
+      when a.app_id in (81,83,131,152,153,237,239,624,1004,1035,1069,1180,1167,1840,1898,2219) then '3rd_party_tools'
+      when a.app_id in (22620, 20513, 18317, 18315, 7192, 2860) then 'ProStores'
+      else 'Other' end) as seller_tools,
+      coalesce(count(distinct(a.item_id)),0) as scss_item_id,
+      coalesce(sum(a.gmv_usd_amt),0) as gmb,
+      coalesce(sum(a.sold_qty),0) as qty_sold,
+      coalesce(sum(a.qty_avail),0) as scss_qty_total
+from
+prs_restricted_v.slng_trans_super_fact a
+left join
+prod_exl_checkout.exl_dw_api_mbl_app c
+on
+a.app_id = c.app_id
+where
+a.auct_start_dt between '2019-04-18' and '2019-04-21'
+and a.iscore = 1
+and a.ck_trans_dt >= '2019-04-18'
+group by a.slr_id,a.auct_start_dt,a.auct_end_dt,a.lstg_site_id,a.slr_cntry_id,a.auct_type_cd,a.gtc_ind,a.app_id,c.prdct_name,a.seller_segment_detail_eu,a.sm_smp_flag,a.vertical,c.app_id) a
+group by slr_id,auct_start_dt,auct_end_dt,lstg_site_id,seller_country_name,auction_type,gtc_ind,listing_tool,chnl_id,site_name,seller_segment,vertical,seller_tools;
+
+
+select sessionstartdate,count(*)
+from selling_prod.exl_confirmed_listings_w
+group by sessionstartdate;
+
+
+insert overwrite table selling_prod.exl_confirmed_listings_w
+select
+a.userid,
+a.sessionstartdate,
+a.auctionenddate,
+'1900-01-01',
+a.siteid,
+a.sellercountryname,
+a.auctiontype,
+a.gtcindicator,
+a.listingtools,
+a.experimentchannel,
+a.sitename,
+a.sellersegment,
+a.vertical,
+a.sellertools,
+coalesce(a.listingitemid,0),
+coalesce(b.successitemid,0),
+coalesce(b.gmbusd,0),
+coalesce(b.quantitysold,0),
+coalesce(a.totallstgqty,0),
+coalesce(b.totalscssqty,0)
+from
+selling_prod.exl_trans_listing_w a
+left join
+selling_prod.exl_trans_checkout_w b
+on
+a.userid = b.userid
+and
+a.sessionstartdate = b.sessionstartdate
+and
+a.auctionenddate = b.auctionenddate
+and
+a.siteid = b.siteid
+and
+a.sellercountryname = b.sellercountryname
+and
+a.auctiontype = b.auctiontype
+and
+a.gtcindicator = b.gtcindicator
+and
+a.listingtools = b.listingtools
+and
+a.experimentchannel = b.experimentchannel
+and
+a.sitename = b.sitename
+and
+a.sellersegment = b.sellersegment
+and
+a.vertical = b.vertical
+and
+a.sellertools = b.sellertools
+;
+
+
+
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+-bash-4.2$ cat gmv_step1.hql
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+--set mapred.job.queue.name=hddq-gdi-ep;
+--set yarn.app.mapreduce.am.resource.mb=8192;
+--set yarn.app.mapreduce.am.command-opts=-Xmx8192m;
+--set mapreduce.job.max.split.locations = 2000;
+--set hive.exec.reducers.bytes.per.reducer=5000000;
+--set hive.exec.reducers.max=20200;
+--set hive.vectorized.execution.enabled = true;
+--set hive.vectorized.execution.reduce.enabled = true;
+--set hive.vectorized.execution.reduce.groupby.enabled = true;
+
+
+CREATE DATABASE IF NOT EXISTS selling_prod_rno LOCATION 'viewfs://apollo-rno/apps/hdmi-prod/b_um/epdatasets/selling_prod_rno';
+describe database prod_exl_checkout;
+
+
+set mapred.job.queue.name=hddq-gdi-ep;
+set yarn.app.mapreduce.am.resource.mb=8192;
+set yarn.app.mapreduce.am.command-opts=-Xmx8192m;
+set mapreduce.job.max.split.locations = 2000;
+set hive.exec.reducers.bytes.per.reducer=5000000;
+set hive.exec.reducers.max=20200;
+set hive.vectorized.execution.enabled = true;
+set hive.vectorized.execution.reduce.enabled = true;
+set hive.vectorized.execution.reduce.groupby.enabled = true;
+
+
+CREATE TABLE `selling_prod_rno.exl_total_gmv_w`(
+  `itemid` bigint COMMENT '', 
+  `userid` bigint COMMENT '', 
+  `sessionstartdate` string COMMENT '', 
+  `auctstartdate` string COMMENT '', 
+  `auctenddate` string COMMENT '', 
+  `cktranstime` string COMMENT '', 
+  `siteid` int COMMENT '', 
+  `auctiontype` string COMMENT '', 
+  `sellercountryname` string COMMENT '', 
+  `gtcindicator` string COMMENT '', 
+  `listingtools` string COMMENT '', 
+  `experimentchannel` int COMMENT '', 
+  `sitename` string COMMENT '', 
+  `sellersegment` string COMMENT '', 
+  `vertical` string COMMENT '', 
+  `listingmode` string COMMENT '', 
+  `relistindicator` int COMMENT '', 
+  `lastreviseddate` string COMMENT '', 
+  `gmbusdamt` double COMMENT '', 
+  `quantitysold` int COMMENT '')
+ROW FORMAT SERDE 
+  'org.apache.hadoop.hive.serde2.avro.AvroSerDe' 
+STORED AS INPUTFORMAT 
+  'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat' 
+OUTPUTFORMAT 
+  'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
+TBLPROPERTIES (
+  'numFiles'='200', 
+  'totalSize'='5238324475', 
+  'transient_lastDdlTime'='1556214628');
+
+
+
+CREATE TABLE IF NOT EXISTS selling_prod.exl_total_gmv_w
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.avro.AvroSerDe'
+WITH SERDEPROPERTIES ('avro.schema.url'='viewfs://apollo-rno/user/b_um/avroschema/sellergmv.avsc')
+STORED AS inputformat 'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat'
+OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
+LOCATION 'viewfs://apollo-rno/apps/hdmi-prod/b_um/epdatasets/selling_metrics_stg/exl_total_gmv_w';
+
+
+select sessionStartDate,count(*) from selling_prod.exl_total_gmv_w group by sessionStartDate;
+
+
+INSERT OVERWRITE TABLE selling_prod_rno.exl_total_gmv_w
+select
+itemId
+,userId
+,sessionStartDate
+,auctStartDate
+,auctEndDate
+,ckTransTime
+,siteId
+,auctionType
+,sellerCountryName
+,gtcIndicator
+,listingTools
+,experimentChannel
+,siteName
+,sellerSegment
+,vertical
+,listingMode
+,relistIndicator
+,lastRevisedDate
+,sum(gmv_usd_amt) as gmbUsdAmt
+,sum(sold_qty) as quantitySold
+from
+(
+SELECT
+a.ITEM_ID as itemId,
+a.slr_id as userId,
+a.CK_TRANS_DT as sessionStartDate,
+a.auct_start_dt as auctStartDate,
+a.auct_end_dt as auctEndDate,
+ck.CREATED_TIME as ckTransTime,
+a.lstg_site_id as siteId,
+(case when a.auct_type_cd in (7,9) then 'FP' else 'Auction' end) as auctionType,
+CASE WHEN a.slr_cntry_id IN (-999, -1,0,1,225,679,1000) THEN 'US'
+           WHEN a.slr_cntry_id IN (3) THEN 'UK'
+           WHEN a.slr_cntry_id IN (15) THEN 'AU'
+           WHEN a.slr_cntry_id IN (77) THEN 'DE'
+           WHEN a.slr_cntry_id = 71 THEN 'FR'
+           WHEN a.slr_cntry_id = 101 THEN 'IT'
+           WHEN a.slr_cntry_id = 186 THEN 'ES'
+           ELSE 'OTHER'
+END AS sellerCountryName,
+(case when a.gtc_ind = 1 then 'GTC' else 'Non_GTC' end) as gtcIndicator,
+a.listing_tool as listingTools,
+CASE WHEN c.app_id is NULL THEN 1
+WHEN TRIM(prdct_name) IN ('IPhoneApp','IPad') THEN 5
+WHEN TRIM(prdct_name) IN ('Android','Android Motors') THEN 4
+WHEN TRIM(prdct_name) IN ('MobWeb','MobWebGXO') THEN 2
+ELSE -999 END AS experimentChannel,
+CASE WHEN a.lstg_site_id IN (0,100)   THEN 'US'
+     WHEN a.lstg_site_id =   3   THEN 'UK'
+     WHEN a.lstg_site_id =   15 THEN 'AU'
+     WHEN a.lstg_site_id =   77 THEN 'DE'
+     WHEN a.lstg_site_id = 71 THEN 'FR'
+     WHEN a.lstg_site_id = 101 THEN 'IT'
+     WHEN a.lstg_site_id = 186 THEN 'ES'
+     ELSE 'OTHER SITES' END AS siteName,
+case when a.seller_segment_detail_eu in ('Merchant', 'Large Merchant', 'Entrepreneur') then a.seller_segment_detail_eu
+     when a.sm_smp_flag in (1,2) then 'C2C SM/SMP' else 'C2C' end as sellerSegment,
+               a.vertical,
+    CASE WHEN a.LSTG_CHNL_CD = 1 THEN 'Relist'
+       WHEN a.LSTG_CHNL_CD = 2 THEN 'Sell Similar'
+    WHEN a.LSTG_CHNL_CD = 3 THEN 'Sell Like'
+    WHEN a.LSTG_CHNL_CD = 4 THEN 'Sell New'
+    else 'Sell New' end as listingMode,
+b.RLST_IND as relistIndicator,
+'2900-01-01 01:01:01' as lastRevisedDate,
+a.gmv_usd_amt,
+a.sold_qty
+FROM
+prs_restricted_v.slng_trans_super_fact a
+inner join prs_restricted_v.slng_lstg_super_fact b
+on
+a.slr_id = b.slr_id
+and
+a.auct_start_dt = b.auct_start_dt
+and
+a.auct_end_dt = b.auct_end_dt
+and
+a.lstg_site_id = b.lstg_site_id
+and
+a.ITEM_ID = b.ITEM_ID
+inner join DW_CHECKOUT_TRANS ck
+on a.ITEM_ID = ck.ITEM_ID
+and a.CK_TRANS_ID = ck.TRANSACTION_ID
+left join
+prod_exl_checkout.exl_dw_api_mbl_app c
+on
+a.app_id = c.app_id
+where
+a.CK_TRANS_DT between '2019-04-15' and '2019-04-21'
+and ck.CREATED_DT between '2019-04-15' and '2019-04-21'
+and a.AUCT_END_DT>='2019-04-15'
+and b.AUCT_END_DT>='2019-04-15'
+and a.iscore = 1
+)a
+group by
+itemId
+,userId
+,sessionStartDate
+,auctStartDate
+,auctEndDate
+,ckTransTime
+,siteId
+,auctionType
+,sellerCountryName
+,gtcIndicator
+,listingTools
+,experimentChannel
+,siteName
+,sellerSegment
+,vertical
+,listingMode
+,relistIndicator
+,lastRevisedDate
+;
+
+
+
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+-bash-4.2$ cat gmv_step2.hql
+DW_ITEM_REVISIONS Not found
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+--set mapred.job.queue.name=hddq-gdi-ep;
+--set yarn.app.mapreduce.am.resource.mb=8192;
+--set yarn.app.mapreduce.am.command-opts=-Xmx8192m;
+--set mapreduce.job.max.split.locations = 2000;
+--set hive.vectorized.execution.enabled = true;
+--set hive.vectorized.execution.reduce.enabled = true;
+--set hive.vectorized.execution.reduce.groupby.enabled = true;
+
+
+CREATE TABLE IF NOT EXISTS selling_prod.exl_total_gmv_revise_dt_w
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.avro.AvroSerDe'
+WITH SERDEPROPERTIES ('avro.schema.url'='viewfs://apollo-rno/user/b_um/avroschema/sellergmv_revise_date.avsc')
+STORED AS inputformat 'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat'
+OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
+LOCATION 'viewfs://apollo-rno/apps/hdmi-prod/b_um/epdatasets/selling_metrics_stg/exl_total_gmv_revise_dt_w';
+
+
+INSERT overwrite TABLE selling_prod.exl_total_gmv_revise_dt_w
+select b.itemId,b.ckTransTime,max(cast(a.date_revised as timestamp)) as lastRevisedDate 
+from GDW_TABLES.DW_ITEM_REVISIONS a
+inner join selling_prod.exl_total_gmv_w b
+on a.item_id=b.itemId
+where
+cast(date_revised as timestamp)<=cast(ckTransTime as timestamp)
+group by itemId,ckTransTime;
+
+
+CREATE TABLE IF NOT EXISTS selling_prod.exl_total_gmv_final
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.avro.AvroSerDe'
+WITH SERDEPROPERTIES ('avro.schema.url'='viewfs://apollo-rno/user/b_um/avroschema/sellergmv.avsc')
+STORED AS inputformat 'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat'
+OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
+LOCATION 'viewfs://apollo-rno/apps/hdmi-prod/b_um/epdatasets/selling_metrics_stg/exl_total_gmv_final';
+
+INSERT overwrite TABLE selling_prod.exl_total_gmv_final
+select
+a.itemId
+,a.userId
+,a.sessionStartDate
+,a.auctStartDate
+,a.auctEndDate
+,a.ckTransTime
+,a.siteId
+,a.auctionType
+,a.sellerCountryName
+,a.gtcIndicator
+,a.listingTools
+,a.experimentChannel
+,a.siteName
+,a.sellerSegment
+,a.vertical
+,a.listingMode
+,a.relistIndicator
+,case when b.lastRevisedDate is not null then b.lastRevisedDate else '2900-01-01 01:01:01' end as lastRevisedDate
+,a.gmbUsdAmt
+,a.quantitySold
+from selling_prod.exl_total_gmv_w a
+left join selling_prod.exl_total_gmv_revise_dt_w b
+on a.itemId=b.itemId
+and a.ckTransTime=b.ckTransTime
+;
+
+
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+-bash-4.2$ cat seller_session_dtl_step1.hql
+---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+set mapred.job.queue.name=hddq-gdi-ep;
+set hive.optimize.index.filter=false;
+
+CREATE EXTERNAL TABLE IF NOT EXISTS selling_prod.slr_session_dtl_step1
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.avro.AvroSerDe'
+WITH SERDEPROPERTIES ('avro.schema.url'='viewfs://apollo-rno/user/b_um/avroschema/slr_session_detail_schema.avsc')
+STORED AS inputformat 'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat'
+OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
+LOCATION 'viewfs://apollo-rno/apps/hdmi-prod/b_um/epdatasets/sellersessionstaging';
+
+
+insert overwrite table selling_prod.slr_session_dtl_step1
+
+ select  guid, sessionKey, sessionStartDate,  userId, experimentChannel, siteId, sellerCountryName, sellerSegment,
+    listingTools, listingMode, doodleInd, successYN from (
+       SELECT a.guid,
+          session_skey as sessionKey,
+          session_start_dt as sessionStartDate,
+          a.user_id as userId,
+          chnl_id as experimentChannel,
+          site_id as siteId,
+          case when cntry.rev_rollup in ('FR', 'IT', 'ES') then 'FRITES'
+           when cntry.rev_rollup in ('US') then 'NA'
+           when cntry.rev_rollup in ('DE') then 'DE'
+           when cntry.rev_rollup in ('UK') then 'UK'
+           when cntry.rev_rollup in ('AU') then 'AU'
+          else 'N/A' end sellerCountryName,
+          slr_sgmnt as sellerSegment,
+          LSTG_FLOW as listingTools,
+          LSTG_MODE as listingMode,
+          case when ddl.sessionKey is not null then 'Yes' else 'No' end as doodleInd,
+          success_yn as successYN
+   FROM
+     (
+         SELECT a.guid,
+             session_skey,
+             session_start_dt,
+             a.user_id,
+             (CASE WHEN a.SELLR_SGMNT_DTL IN ('FTL','FirstTimeLister') THEN 'FTL' ELSE a.SELLR_SGMNT_DTL end) AS slr_sgmnt, -- Dimension 1 : C2C seller segments
+        a.site_id, -- Dimension 2 : site_id
+         case when EXPRNC_TYPE_DESC in ('PC') and  APP_DEVICE_TXT is null and EXPERIENCE_LEVEL1 in ('Browser') then '1'
+         when EXPRNC_TYPE_DESC in ('Mobile') and  APP_DEVICE_TXT is null and EXPERIENCE_LEVEL1 in ('Browser') then '2'
+         when EXPRNC_TYPE_DESC in ('Mobile') and  APP_DEVICE_TXT in ('Android') and EXPERIENCE_LEVEL1 in ('Apps') then '4'
+         when EXPRNC_TYPE_DESC in ('Mobile') and  APP_DEVICE_TXT in ('iPhone','iPad') and EXPERIENCE_LEVEL1 in ('Apps') then '5'
+         else '-999' end as chnl_id,
+        (case when lstg_tool_desc = 'Bolt Native' then 'Mobile' else 'Web' end) as LSTG_FLOW, -- Dimension 3 : Listing flow
+        LSTG_MODE_DESC as LSTG_MODE, -- Dimension 4 : Listing mode
+        MAX (draft_id) draft,
+        MAX (SCCSS_FLAG) AS success_yn
+      FROM  prs_restricted_v.slng_session_super_fact a
+      LEFT JOIN (Select * from dw_users  where user_dsgntn_id = 2
+         AND COALESCE
+           (user_dsgntn_dt,  '1900-01-01') <= '${hiveconf:end_date}')b
+           on b.user_id = a.user_id
+      WHERE session_start_dt BETWEEN '${hiveconf:start_date}' AND '${hiveconf:end_date}'
+        AND SELLR_SGMNT_DTL IN ('FTL', 'NEW')
+        AND (LSTG_MODE_DESC NOT LIKE    ('%Revi%')
+        AND  LSTG_MODE_DESC NOT LIKE    ( '%Reli%')
+        AND  LSTG_MODE_DESC NOT LIKE    ('%Sim%'))
+        AND TRFC_SRC_ID in (1,2,3)
+        AND b.user_id IS NULL
+        group by guid, session_skey, session_start_dt, a.user_id,
+        CASE WHEN a.SELLR_SGMNT_DTL IN ('FTL','FirstTimeLister') THEN 'FTL' ELSE a.SELLR_SGMNT_DTL end,
+        site_id,
+        case when EXPRNC_TYPE_DESC in ('PC') and  APP_DEVICE_TXT is null and EXPERIENCE_LEVEL1 in ('Browser') then '1'
+         when EXPRNC_TYPE_DESC in ('Mobile') and  APP_DEVICE_TXT is null and EXPERIENCE_LEVEL1 in ('Browser') then '2'
+         when EXPRNC_TYPE_DESC in ('Mobile') and  APP_DEVICE_TXT in ('Android') and EXPERIENCE_LEVEL1 in ('Apps') then '4'
+         when EXPRNC_TYPE_DESC in ('Mobile') and  APP_DEVICE_TXT in ('iPhone','iPad') and EXPERIENCE_LEVEL1 in ('Apps') then '5'
+         else '-999' end
+         , case when lstg_tool_desc = 'Bolt Native' then 'Mobile' else 'Web' end
+         ,LSTG_MODE_DESC)a
+       INNER JOIN gdw_tables.dw_users u ON
+     (u.user_id = a.user_id)
+   INNER JOIN gdw_tables.dw_countries cntry ON
+     (u.user_cntry_id = cntry.cntry_id)
+      LEFT OUTER JOIN selling_prod.slr_session_dtl_doodle ddl
+     on (a.guid=ddl.guid
+     and a.session_skey=ddl.sessionKey
+     and a.session_start_dt = ddl.sessionStartDate
+         )
+     )y
+    where doodleInd LIKE ('%No%')
+      GROUP BY guid, sessionKey, sessionStartDate,  userId, experimentChannel, siteId, sellerCountryName, sellerSegment,
+    listingTools, listingMode, doodleInd, successYN;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/apache/spark2.3/bin/spark-sql --master yarn --queue hddq-gdi-ep --executor-memory 10G
+
+
+hive -f /home/b_um/sellermetrics/hivescripts/seller_detail.hql
+
+
+-bash-4.2$ grep insert seller_detail.hql
+insert overwrite table selling_prod.exl_trans_listing_w
+insert overwrite table selling_prod.exl_trans_checkout_w
+insert overwrite table selling_prod.exl_confirmed_listings_w
+
+
+INSERT overwrite TABLE selling_prod.exl_seller_conversion_fnl_w
+INSERT into selling_prod.exl_seller_conversion_fnl_w
+
+
+-bash-4.2$ grep -i insert gmv_step1.hql
+INSERT overwrite TABLE selling_prod.exl_total_gmv_w
+-bash-4.2$ grep -i insert gmv_step2.hql
+INSERT overwrite TABLE selling_prod.exl_total_gmv_revise_dt_w
+INSERT overwrite TABLE selling_prod.exl_total_gmv_final
+
+select * from selling_prod.exl_total_gmv_w limit 10;
+select * from selling_prod.exl_total_gmv_revise_dt_w limit 10;
+select * from selling_prod.exl_total_gmv_final limit 10;
+
+
+
+select * from selling_prod.exl_trans_listing_w limit 10;
+select * from selling_prod.exl_trans_checkout_w limit 10;
+select * from selling_prod.exl_confirmed_listings_w limit 10;
+
+createtab_stmt
+CREATE TABLE `selling_prod.exl_confirmed_listings_w`(
+  `userid` bigint COMMENT '', 
+  `sessionstartdate` string COMMENT '', 
+  `auctionenddate` string COMMENT '', 
+  `transactiondate` string COMMENT '', 
+  `siteid` int COMMENT '', 
+  `sellercountryname` string COMMENT '', 
+  `auctiontype` string COMMENT '', 
+  `gtcindicator` string COMMENT '', 
+  `listingtools` string COMMENT '', 
+  `experimentchannel` int COMMENT '', 
+  `sitename` string COMMENT '', 
+  `sellersegment` string COMMENT '', 
+  `vertical` string COMMENT '', 
+  `sellertools` string COMMENT '', 
+  `listingitemid` int COMMENT '', 
+  `successitemid` int COMMENT '', 
+  `gmbusd` double COMMENT '', 
+  `quantitysold` int COMMENT '', 
+  `totallstgqty` int COMMENT '', 
+  `totalscssqty` int COMMENT '')
+ROW FORMAT SERDE 
+  'org.apache.hadoop.hive.serde2.avro.AvroSerDe' 
+STORED AS INPUTFORMAT 
+  'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat' 
+OUTPUTFORMAT 
+  'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
+LOCATION
+  'viewfs://apollo-rno/apps/hdmi-prod/b_um/epdatasets/selling_metrics_stg/exl_confirmed_listings_w'
+TBLPROPERTIES (
+  'COLUMN_STATS_ACCURATE'='true', 
+  'numFiles'='6', 
+  'numRows'='67585200', 
+  'rawDataSize'='0', 
+  'totalSize'='1209674194', 
+  'transient_lastDdlTime'='1555966130')
+
+
+
+createtab_stmt
+CREATE TABLE `selling_prod.exl_trans_checkout_w`(
+  `userid` bigint COMMENT '', 
+  `sessionstartdate` string COMMENT '', 
+  `auctionenddate` string COMMENT '', 
+  `transactiondate` string COMMENT '', 
+  `siteid` int COMMENT '', 
+  `sellercountryname` string COMMENT '', 
+  `auctiontype` string COMMENT '', 
+  `gtcindicator` string COMMENT '', 
+  `listingtools` string COMMENT '', 
+  `experimentchannel` int COMMENT '', 
+  `sitename` string COMMENT '', 
+  `sellersegment` string COMMENT '', 
+  `vertical` string COMMENT '', 
+  `sellertools` string COMMENT '', 
+  `successitemid` int COMMENT '', 
+  `gmbusd` float COMMENT '', 
+  `quantitysold` int COMMENT '', 
+  `totalscssqty` int COMMENT '')
+ROW FORMAT SERDE 
+  'org.apache.hadoop.hive.serde2.avro.AvroSerDe' 
+STORED AS INPUTFORMAT 
+  'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat' 
+OUTPUTFORMAT 
+  'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
+LOCATION
+  'viewfs://apollo-rno/apps/hdmi-prod/b_um/epdatasets/selling_metrics_stg/exl_trans_checkout_w'
+TBLPROPERTIES (
+  'COLUMN_STATS_ACCURATE'='true', 
+  'numFiles'='4', 
+  'numRows'='18378073', 
+  'rawDataSize'='0', 
+  'totalSize'='362802238', 
+  'transient_lastDdlTime'='1555965647')
+
+
+
+hive -f /export/home/b_um/sellermetrics/hivescripts/gmv_step1.hql -hiveconf start_date=2019-04-10 -hiveconf end_date=2019-04-19
+hive -f /export/home/b_um/sellermetrics/hivescripts/gmv_step2.hql -hiveconf start_date=2019-04-10 -hiveconf end_date=2019-04-19
+
+gmv_step1.hql
+
+prs_restricted_v.
+
+
+
+nohup ./test_chain2.ksh &> nohup2.out&
+
+selling_prod.exl_seller_conversion_fnl_w
+
+export SPARK_HOME=/apache/spark2.3
+$SPARK_HOME/bin/spark-sql \
+--master yarn \
+--queue hddq-gdi-ep \
+--files /apache/hive/conf/hive-site.xml \
+--executor-memory 5G \
+--driver-memory 5G \
+--executor-cores 4 \
+--num-executors 5 \
+--conf spark.port.maxRetries=100 \
+-f /export/home/b_um/sellermetrics/hivescripts/gmv_step1.hql \
+-hiveconf start_date=2019-04-10 \
+-hiveconf end_date=2019-04-19
+
+export SPARK_HOME=/apache/spark2.3
+$SPARK_HOME/bin/spark-sql \
+--master yarn \
+--queue hddq-gdi-ep \
+--files /apache/hive/conf/hive-site.xml \
+--executor-memory 5G \
+--driver-memory 5G \
+--executor-cores 4 \
+--num-executors 5 \
+--conf spark.port.maxRetries=100 \
+-f /export/home/b_um/sellermetrics/hivescripts/gmv_step2.hql \
+-hiveconf start_date=2019-04-10 \
+-hiveconf end_date=2019-04-19
+
+
+
+export SPARK_HOME=/apache/spark2.3
+$SPARK_HOME/bin/spark-sql \
+--master yarn \
+--queue hddq-gdi-ep \
+--files /apache/hive/conf/hive-site.xml \
+--executor-memory 5G \
+--driver-memory 5G \
+--executor-cores 4 \
+--num-executors 5 \
+--conf spark.port.maxRetries=100 \
+-f /export/home/b_um/sellermetrics/hivescripts/seller_detail.hql \
+-hiveconf start_date=2019-04-10 \
+-hiveconf end_date=2019-04-19
+
+
+GLBL_RPRT_BSNS_CTGRY_CD' in definition of VIEW slng_lstg_super_fact
+
+
+export SPARK_HOME=/apache/spark2.3
+$SPARK_HOME/bin/spark-sql \
+--master yarn \
+--queue hddq-gdi-ep \
+--files /apache/hive/conf/hive-site.xml \
+--executor-memory 5G \
+--driver-memory 5G \
+--executor-cores 4 \
+--num-executors 5 \
+--conf spark.port.maxRetries=100 \
+-f /export/home/b_um/sellermetrics/hivescripts/seller_conversion_step1.hql \
+-hiveconf start_date=2019-02-19 \
+-hiveconf end_date=2019-02-19
+
+
+CREATE TABLE `selling_prod.exl_trans_listing_w`(
+  `userid` bigint COMMENT '', 
+  `sessionstartdate` string COMMENT '', 
+  `auctionenddate` string COMMENT '', 
+  `siteid` int COMMENT '', 
+  `sellercountryname` string COMMENT '', 
+  `auctiontype` string COMMENT '', 
+  `gtcindicator` string COMMENT '', 
+  `listingtools` string COMMENT '', 
+  `experimentchannel` int COMMENT '', 
+  `sitename` string COMMENT '', 
+  `sellersegment` string COMMENT '', 
+  `vertical` string COMMENT '', 
+  `sellertools` string COMMENT '', 
+  `listingitemid` int COMMENT '', 
+  `totallstgqty` int COMMENT '')
+ROW FORMAT SERDE 
+  'org.apache.hadoop.hive.serde2.avro.AvroSerDe' 
+STORED AS INPUTFORMAT 
+  'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat' 
+OUTPUTFORMAT 
+  'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
+LOCATION
+  'viewfs://apollo-rno/apps/hdmi-prod/b_um/epdatasets/selling_metrics_stg/exl_trans_listing_w'
+TBLPROPERTIES (
+  'COLUMN_STATS_ACCURATE'='true', 
+  'numFiles'='14', 
+  'numRows'='67585200', 
+  'rawDataSize'='0', 
+  'totalSize'='1019384533', 
+  'transient_lastDdlTime'='1555964935')
+
+CREATE TABLE IF NOT EXISTS selling_prod.exl_seller_conversion_fnl_w
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.avro.AvroSerDe'
+WITH SERDEPROPERTIES ('avro.schema.url'='viewfs://apollo-rno/user/b_um/avroschema/c2c_conversion_schema.avsc')
+STORED AS inputformat 'org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat'
+OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat'
+LOCATION 'viewfs://apollo-rno/apps/hdmi-prod/b_um/epdatasets/selling_metrics_stg/exl_seller_conversion_fnl_w';
+

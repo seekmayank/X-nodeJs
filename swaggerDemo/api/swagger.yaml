@@ -1,0 +1,30 @@
+---
+swagger: "2.0"
+info:
+  description: "This is a sample API "
+  version: "1.0.0"
+  title: "Swagger Demo"
+host: "localhost:3000"
+basePath: "/api"
+schemes:
+- "http"
+consumes:
+- "application/json"
+produces:
+- "application/json"
+paths:
+  /courses/{id}:
+    get:
+      tags:
+      - "courses"
+      operationId: "findPetsByStatus"
+      parameters:
+      - name: "id"
+        in: "path"
+        required: true
+        type: "integer"
+      responses:
+        200:
+          description: "successful operation"
+      x-swagger-router-controller: "Courses"
+definitions: {}
